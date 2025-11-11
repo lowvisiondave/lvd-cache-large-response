@@ -1,34 +1,75 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Chunked Cache for Large Responses
+
+A Next.js demonstration of caching large API responses (over 2MB) by splitting them into chunks to work around Next.js's ~2MB cache entry limit.
+
+## Overview
+
+Next.js `unstable_cache` has a ~2MB limit per cache entry. This project implements a chunked caching strategy that automatically splits large responses into smaller chunks, stores them separately, and reassembles them on retrieval.
+
+## Features
+
+- **Automatic Chunking**: Splits large responses into chunks under 2MB each
+- **Validation**: Ensures all chunks are present before reassembly
+- **Error Handling**: Detects and handles partial cache eviction
+- **Self-Documenting Code**: Clean, readable implementation without excessive comments
+
+## How It Works
+
+1. **Storage**: When caching large data, it's split into chunks (default: 1.5MB each)
+2. **Metadata**: Stores chunk count in a separate metadata cache entry
+3. **Retrieval**: Validates that all expected chunks are present before reassembly
+4. **Reassembly**: Combines chunks back into the original data structure
+
+If any chunk is missing (due to cache eviction), the cache is treated as invalid and fresh data is fetched.
+
+## Usage
+
+```typescript
+import { createChunkedCache } from "@/lib/chunkedCache";
+
+const cache = createChunkedCache(
+  "cache-key-prefix",
+  async () => {
+    // Your fetch function that returns large data
+    const response = await fetch("https://api.example.com/large-data");
+    return response.json();
+  },
+  3600 // Cache revalidation time in seconds
+);
+
+const data = await cache.get(); // Returns cached or fresh data
+```
+
+## Example
+
+See `app/page.tsx` for a working example that fetches and caches country data from the REST Countries API (~4.68 MB response).
 
 ## Getting Started
 
-First, run the development server:
+First, install dependencies:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+pnpm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Then, run the development server:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+pnpm dev
+```
 
-## Learn More
+Open [http://localhost:3000](http://localhost:3000) to see the demo.
 
-To learn more about Next.js, take a look at the following resources:
+## Project Structure
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- `lib/chunkedCache.ts` - Core chunked caching implementation
+- `lib/countries.ts` - Example data fetching and types
+- `app/page.tsx` - Demo page showing chunked cache in action
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Logging
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+The implementation includes minimal logging:
+- `[ChunkedCache] Cache MISS - Fetching fresh data` - When cache miss occurs
+- `[ChunkedCache] Cache MISS - Storing X chunks (Y MB)` - When storing chunks
+- `[ChunkedCache] Cache HIT - Retrieved X chunks` - When retrieving from cache
+- `[ChunkedCache] Validation FAILED - ...` - When chunk validation fails
