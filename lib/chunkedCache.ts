@@ -31,15 +31,8 @@ function createChunkKey(prefix: string, chunkIndex: number): string {
 }
 
 /**
- * Request-scoped temporary store for values being cached.
- * This only exists during the current request and is used as a bridge
- * to get values into unstable_cache. It's not persisted across requests.
- */
-const requestStore = new Map<string, unknown>();
-
-/**
  * Stores a value in the cache.
- * The value is temporarily stored in requestStore, then cached via unstable_cache.
+ * The value is captured in a closure-scoped Map, then cached via unstable_cache.
  */
 async function storeCachedValue<T>(
   key: string,
@@ -49,13 +42,15 @@ async function storeCachedValue<T>(
 ): Promise<void> {
   const cacheKey = `${key}:${revalidateSeconds}`;
 
-  // Store value temporarily for this request only
-  requestStore.set(cacheKey, value);
+  // Create a Map scoped to this function call
+  // It's captured in the closure of the function passed to unstable_cache
+  const store = new Map<string, unknown>();
+  store.set(cacheKey, value);
 
-  // Create cache function that reads from requestStore
+  // Create cache function that reads from the closure-scoped Map
   const cachedFn = unstable_cache(
     async () => {
-      const stored = requestStore.get(cacheKey) as T | undefined;
+      const stored = store.get(cacheKey) as T | undefined;
       if (stored === undefined) {
         throw new Error(`Cache miss for key: ${cacheKey}`);
       }
@@ -74,8 +69,8 @@ async function storeCachedValue<T>(
 
 /**
  * Retrieves a cached value. Returns null if cache miss.
- * Note: requestStore is empty on retrieval (new serverless invocation),
- * but unstable_cache should return cached value without executing the function.
+ * Note: The Map is empty, but unstable_cache should return cached value
+ * without executing the function if cache exists.
  */
 async function getCachedValue<T>(
   key: string,
@@ -85,12 +80,13 @@ async function getCachedValue<T>(
   const cacheKey = `${key}:${revalidateSeconds}`;
 
   try {
-    // Create cache function with same structure
+    // Create an empty Map scoped to this function call
     // If cache exists, unstable_cache returns cached value without executing function
-    // If cache misses, function executes, reads empty requestStore, throws
+    // If cache misses, function executes, reads empty Map, throws
+    const store = new Map<string, unknown>();
     const cachedFn = unstable_cache(
       async () => {
-        const stored = requestStore.get(cacheKey) as T | undefined;
+        const stored = store.get(cacheKey) as T | undefined;
         if (stored === undefined) {
           throw new Error(`Cache miss for key: ${cacheKey}`);
         }

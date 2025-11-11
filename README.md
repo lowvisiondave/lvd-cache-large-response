@@ -21,7 +21,7 @@ Next.js `unstable_cache` has a ~2MB limit per cache entry. This project implemen
 3. **Retrieval**: Fetches all chunks in parallel using `Promise.all` for optimal performance
 4. **Reassembly**: Combines chunks back into the original JSON string and parses it
 
-**Architecture**: Uses Next.js `unstable_cache` for persistence across serverless invocations. A request-scoped temporary store is used as a bridge to get values into the cache during storage, but persistence is handled entirely by Next.js's cache system.
+**Architecture**: Uses Next.js `unstable_cache` for persistence across serverless invocations. A closure-scoped Map is created in each function call and captured in the closure of the function passed to `unstable_cache`. This ensures proper isolation between concurrent requests in Fluid Compute or traditional servers, preventing race conditions and data leakage. Persistence is handled entirely by Next.js's cache system.
 
 **Error Handling**: If any chunk is missing (due to cache eviction), the JSON will be incomplete and `JSON.parse` will fail during reassembly. This causes the cache to be treated as invalid, triggering a fresh data fetch automatically.
 
