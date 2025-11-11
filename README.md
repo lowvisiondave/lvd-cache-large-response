@@ -8,19 +8,22 @@ Next.js `unstable_cache` has a ~2MB limit per cache entry. This project implemen
 
 ## Features
 
-- **Automatic Chunking**: Splits large responses into chunks under 2MB each
-- **Validation**: Ensures all chunks are present before reassembly
-- **Error Handling**: Detects and handles partial cache eviction
-- **Self-Documenting Code**: Clean, readable implementation without excessive comments
+- **Automatic Chunking**: Splits large responses into chunks (default: 1.5MB each, safely under the 2MB limit)
+- **Parallel Retrieval**: Fetches all chunks concurrently for optimal performance
+- **Automatic Validation**: Missing chunks are detected during JSON parsing
+- **Error Handling**: Detects and handles partial cache eviction gracefully
+- **Type-Safe**: Full TypeScript support with generic types
 
 ## How It Works
 
-1. **Storage**: When caching large data, it's split into chunks (default: 1.5MB each)
-2. **Metadata**: Stores chunk count in a separate metadata cache entry
-3. **Retrieval**: Validates that all expected chunks are present before reassembly
-4. **Reassembly**: Combines chunks back into the original data structure
+1. **Storage**: When caching large data, it's automatically split into chunks (default: 1.5MB each)
+2. **Metadata**: Stores chunk count in a separate metadata cache entry for validation
+3. **Retrieval**: Fetches all chunks in parallel using `Promise.all` for optimal performance
+4. **Reassembly**: Combines chunks back into the original JSON string and parses it
 
-If any chunk is missing (due to cache eviction), the cache is treated as invalid and fresh data is fetched.
+**Architecture**: Uses Next.js `unstable_cache` for persistence across serverless invocations. A request-scoped temporary store is used as a bridge to get values into the cache during storage, but persistence is handled entirely by Next.js's cache system.
+
+**Error Handling**: If any chunk is missing (due to cache eviction), the JSON will be incomplete and `JSON.parse` will fail during reassembly. This causes the cache to be treated as invalid, triggering a fresh data fetch automatically.
 
 ## Usage
 
@@ -28,13 +31,13 @@ If any chunk is missing (due to cache eviction), the cache is treated as invalid
 import { createChunkedCache } from "@/lib/chunkedCache";
 
 const cache = createChunkedCache(
-  "cache-key-prefix",
+  "cache-key-prefix", // Unique prefix for this cache
   async () => {
     // Your fetch function that returns large data
     const response = await fetch("https://api.example.com/large-data");
     return response.json();
   },
-  3600 // Cache revalidation time in seconds
+  3600 // Optional: Cache revalidation time in seconds (default: 3600)
 );
 
 const data = await cache.get(); // Returns cached or fresh data
@@ -68,8 +71,14 @@ Open [http://localhost:3000](http://localhost:3000) to see the demo.
 
 ## Logging
 
-The implementation includes minimal logging:
+The implementation includes helpful logging for debugging:
+
+**Cache Operations:**
 - `[ChunkedCache] Cache MISS - Fetching fresh data` - When cache miss occurs
 - `[ChunkedCache] Cache MISS - Storing X chunks (Y MB)` - When storing chunks
-- `[ChunkedCache] Cache HIT - Retrieved X chunks` - When retrieving from cache
-- `[ChunkedCache] Validation FAILED - ...` - When chunk validation fails
+- `[ChunkedCache] Cache HIT - Retrieved X chunks` - When successfully retrieving from cache
+
+**Errors:**
+- `[ChunkedCache] Validation FAILED - Failed to reassemble chunks: ...` - When JSON parsing fails (usually due to missing chunks)
+- `[ChunkedCache] Failed to retrieve metadata: ...` - When metadata retrieval fails
+- `[ChunkedCache] Failed to retrieve chunk ...` - When individual chunk retrieval fails

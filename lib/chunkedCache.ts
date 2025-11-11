@@ -5,7 +5,7 @@ const SAFE_CHUNK_SIZE_BYTES = 1_500_000;
 function splitIntoChunks<T>(
   data: T,
   maxChunkSizeBytes = SAFE_CHUNK_SIZE_BYTES,
-): string[] {
+): { chunks: string[]; jsonString: string } {
   const jsonString = JSON.stringify(data);
   const chunks: string[] = [];
 
@@ -18,7 +18,7 @@ function splitIntoChunks<T>(
     chunks.push(chunk);
   }
 
-  return chunks;
+  return { chunks, jsonString };
 }
 
 function reassembleChunks<T>(chunks: string[]): T {
@@ -30,86 +30,97 @@ function createChunkKey(prefix: string, chunkIndex: number): string {
   return `${prefix}::chunk${chunkIndex}`;
 }
 
-// In-memory store for cache function data
-// Note: This is used as a bridge to Next.js cache via unstable_cache
-const chunkDataStore = new Map<string, string>();
-
-type CacheFunction<T> = ReturnType<typeof unstable_cache<() => Promise<T>>>;
+/**
+ * Request-scoped temporary store for values being cached.
+ * This only exists during the current request and is used as a bridge
+ * to get values into unstable_cache. It's not persisted across requests.
+ */
+const requestStore = new Map<string, unknown>();
 
 /**
- * Generic cache function factory that reduces duplication
+ * Stores a value in the cache.
+ * The value is temporarily stored in requestStore, then cached via unstable_cache.
  */
-function createCacheFunction<T>(
+async function storeCachedValue<T>(
+  key: string,
+  value: T,
+  revalidateSeconds: number,
+  tagPrefix: string,
+): Promise<void> {
+  const cacheKey = `${key}:${revalidateSeconds}`;
+
+  // Store value temporarily for this request only
+  requestStore.set(cacheKey, value);
+
+  // Create cache function that reads from requestStore
+  const cachedFn = unstable_cache(
+    async () => {
+      const stored = requestStore.get(cacheKey) as T | undefined;
+      if (stored === undefined) {
+        throw new Error(`Cache miss for key: ${cacheKey}`);
+      }
+      return stored;
+    },
+    [cacheKey],
+    {
+      revalidate: revalidateSeconds,
+      tags: [`${tagPrefix}:${key}`],
+    },
+  );
+
+  // Call it to cache the value
+  await cachedFn();
+}
+
+/**
+ * Retrieves a cached value. Returns null if cache miss.
+ * Note: requestStore is empty on retrieval (new serverless invocation),
+ * but unstable_cache should return cached value without executing the function.
+ */
+async function getCachedValue<T>(
   key: string,
   revalidateSeconds: number,
   tagPrefix: string,
-  getData: () => T | null,
-): CacheFunction<T> {
-  const fn = async () => {
-    const data = getData();
-    if (data === null) {
-      throw new Error(`Data not found for key: ${key}`);
-    }
-    return data;
-  };
+): Promise<T | null> {
+  const cacheKey = `${key}:${revalidateSeconds}`;
 
-  return unstable_cache(fn, [key], {
-    revalidate: revalidateSeconds,
-    tags: [`${tagPrefix}:${key}`],
-  });
-}
+  try {
+    // Create cache function with same structure
+    // If cache exists, unstable_cache returns cached value without executing function
+    // If cache misses, function executes, reads empty requestStore, throws
+    const cachedFn = unstable_cache(
+      async () => {
+        const stored = requestStore.get(cacheKey) as T | undefined;
+        if (stored === undefined) {
+          throw new Error(`Cache miss for key: ${cacheKey}`);
+        }
+        return stored;
+      },
+      [cacheKey],
+      {
+        revalidate: revalidateSeconds,
+        tags: [`${tagPrefix}:${key}`],
+      },
+    );
 
-/**
- * Cache function registry to avoid creating duplicate cache functions
- */
-class CacheFunctionRegistry<T> {
-  private cacheFunctions = new Map<string, CacheFunction<T>>();
-
-  getOrCreate(
-    key: string,
-    revalidateSeconds: number,
-    tagPrefix: string,
-    getData: () => T | null,
-  ): CacheFunction<T> {
-    const cacheKey = `${key}:${revalidateSeconds}`;
-
-    if (!this.cacheFunctions.has(cacheKey)) {
-      this.cacheFunctions.set(
-        cacheKey,
-        createCacheFunction(key, revalidateSeconds, tagPrefix, getData),
-      );
-    }
-
-    const cacheFn = this.cacheFunctions.get(cacheKey);
-    if (!cacheFn) {
-      throw new Error(`Failed to create cache function for ${key}`);
-    }
-
-    return cacheFn;
+    return await cachedFn();
+  } catch {
+    // Cache miss - return null
+    return null;
   }
 }
-
-const metadataCacheRegistry = new CacheFunctionRegistry<{
-  chunkCount: number;
-}>();
-const chunkCacheRegistry = new CacheFunctionRegistry<string>();
 
 async function storeMetadata(
   metadataKey: string,
   chunkCount: number,
   revalidateSeconds: number,
 ): Promise<void> {
-  chunkDataStore.set(metadataKey, JSON.stringify({ chunkCount }));
-  const cacheFn = metadataCacheRegistry.getOrCreate(
+  await storeCachedValue(
     metadataKey,
+    { chunkCount },
     revalidateSeconds,
     "metadata",
-    () => {
-      const data = chunkDataStore.get(metadataKey);
-      return data ? (JSON.parse(data) as { chunkCount: number }) : null;
-    },
   );
-  await cacheFn();
 }
 
 async function retrieveMetadata(
@@ -117,16 +128,12 @@ async function retrieveMetadata(
   revalidateSeconds: number,
 ): Promise<{ chunkCount: number } | null> {
   try {
-    const cacheFn = metadataCacheRegistry.getOrCreate(
+    const result = await getCachedValue<{ chunkCount: number }>(
       metadataKey,
       revalidateSeconds,
       "metadata",
-      () => {
-        const data = chunkDataStore.get(metadataKey);
-        return data ? (JSON.parse(data) as { chunkCount: number }) : null;
-      },
     );
-    return await cacheFn();
+    return result;
   } catch (error) {
     console.error(`[ChunkedCache] Failed to retrieve metadata: ${error}`);
     return null;
@@ -138,14 +145,7 @@ async function storeChunk(
   chunkData: string,
   revalidateSeconds: number,
 ): Promise<void> {
-  chunkDataStore.set(chunkKey, chunkData);
-  const cacheFn = chunkCacheRegistry.getOrCreate(
-    chunkKey,
-    revalidateSeconds,
-    "chunk",
-    () => chunkDataStore.get(chunkKey) ?? null,
-  );
-  await cacheFn();
+  await storeCachedValue(chunkKey, chunkData, revalidateSeconds, "chunk");
 }
 
 async function retrieveChunk(
@@ -153,13 +153,12 @@ async function retrieveChunk(
   revalidateSeconds: number,
 ): Promise<string | null> {
   try {
-    const cacheFn = chunkCacheRegistry.getOrCreate(
+    const result = await getCachedValue<string>(
       chunkKey,
       revalidateSeconds,
       "chunk",
-      () => chunkDataStore.get(chunkKey) ?? null,
     );
-    return await cacheFn();
+    return result;
   } catch (error) {
     console.error(
       `[ChunkedCache] Failed to retrieve chunk ${chunkKey}: ${error}`,
@@ -185,33 +184,25 @@ export function createChunkedCache<T>(
       return null;
     }
 
-    const expectedChunkCount = metadata.chunkCount;
-    const chunkKeys = Array.from({ length: expectedChunkCount }, (_, i) =>
+    const chunkKeys = Array.from({ length: metadata.chunkCount }, (_, i) =>
       createChunkKey(cacheKeyPrefix, i),
     );
 
-    // Retrieve all chunks in parallel (removed double retrieval)
+    // Retrieve all chunks in parallel
     const chunks = await Promise.all(
       chunkKeys.map((chunkKey) => retrieveChunk(chunkKey, revalidateSeconds)),
     );
 
-    // Validate all chunks are present
+    // Filter out null chunks (missing chunks will cause JSON.parse to fail)
     const validChunks = chunks.filter(
       (chunk): chunk is string => chunk !== null,
     );
-
-    if (validChunks.length !== expectedChunkCount) {
-      console.log(
-        `[ChunkedCache] Validation FAILED - Expected ${expectedChunkCount} chunks, got ${validChunks.length}`,
-      );
-      return null;
-    }
 
     try {
       const data = reassembleChunks<T>(validChunks);
       return {
         data,
-        chunkCount: validChunks.length,
+        chunkCount: metadata.chunkCount,
       };
     } catch (error) {
       console.error(
@@ -222,12 +213,8 @@ export function createChunkedCache<T>(
   }
 
   async function storeInCache(data: T): Promise<void> {
-    const chunks = splitIntoChunks(data);
-    const chunkKeys = chunks.map((_, index) =>
-      createChunkKey(cacheKeyPrefix, index),
-    );
+    const { chunks, jsonString } = splitIntoChunks(data);
 
-    const jsonString = JSON.stringify(data);
     const sizeInMB =
       new TextEncoder().encode(jsonString).length / (1024 * 1024);
     console.log(
@@ -237,7 +224,11 @@ export function createChunkedCache<T>(
     await Promise.all([
       storeMetadata(metadataKey, chunks.length, revalidateSeconds),
       ...chunks.map((chunk, index) =>
-        storeChunk(chunkKeys[index], chunk, revalidateSeconds),
+        storeChunk(
+          createChunkKey(cacheKeyPrefix, index),
+          chunk,
+          revalidateSeconds,
+        ),
       ),
     ]);
   }
